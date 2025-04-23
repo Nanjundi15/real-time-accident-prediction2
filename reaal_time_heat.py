@@ -55,8 +55,8 @@ conn.commit()
 
 # Email sending function
 def send_email(subject, body, recipient_email):
-    sender_email = "Nanjundi9731@gmail.com"  # Change this to your sender email
-    sender_password = "wvpl ovah dkgc dclg"  # Use your app password (e.g., Gmail app password)
+    sender_email = "Nanjundi9731@gmail.com"
+    sender_password = "wvpl ovah dkgc dclg"  # Use Gmail app password
 
     msg = MIMEMultipart()
     msg["From"] = sender_email
@@ -72,7 +72,7 @@ def send_email(subject, body, recipient_email):
     except Exception as e:
         print(f"❌ Email failed: {e}")
 
-# Template (SHAP removed)
+# Empty template (replace with real HTML if needed)
 html_template = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -264,7 +264,7 @@ def result():
     lon_raw = request.form.get("longitude")
 
     if not features_raw or not lat_raw or not lon_raw:
-        return render_template_string(html_template, predictions={"Error": "Please fill all fields: features, latitude, and longitude."}, zip=zip)
+        return render_template_string(html_template, predictions={"Error": "Please fill all fields."}, zip=zip)
 
     try:
         lat = float(lat_raw)
@@ -285,7 +285,6 @@ def result():
         for model_name, model in models.items():
             pred = int(model.predict(input_array)[0])
             predictions[model_name] = class_names.get(pred)
-
             if hasattr(model, 'predict_proba'):
                 probs = model.predict_proba(input_array)[0]
                 model_probs[model_name] = list(map(float, probs))
@@ -296,16 +295,13 @@ def result():
         predictions["LSTM"] = class_names.get(lstm_pred)
         model_probs["LSTM"] = list(map(float, lstm_probs))
 
-        # Send email if Severe Accident detected
-        severe_detected = any(pred == "Severe Accident" for pred in predictions.values())
-        if severe_detected:
+        # Email if severe
+        if "Severe Accident" in predictions.values():
             subject = "🚨 Accident Alert: Severe Prediction"
             body = f"A Severe Accident was predicted!\n\nLatitude: {lat}\nLongitude: {lon}\n\nModel Predictions:\n" + \
                    "\n".join(f"{k}: {v}" for k, v in predictions.items())
-            recipient_email = "chetanj1005@gmail.com"  # 🔁 Replace with your desired email
-            send_email(subject, body, recipient_email)
+            send_email(subject, body, "chetanj1005@gmail.com")
 
-        # Store predictions in DB
         cursor.execute('''INSERT INTO predictions (
             timestamp, features, latitude, longitude,
             logistic_pred, decision_tree_pred, random_forest_pred,
@@ -338,8 +334,83 @@ def result():
         )
 
     except ValueError:
-        return render_template_string(html_template, predictions={"Error": "Invalid input! Please ensure features, latitude, and longitude are numbers."}, zip=zip)
+        return render_template_string(html_template, predictions={"Error": "Invalid input! Ensure fields are numbers."}, zip=zip)
 
+@app.route('/predict', methods=['POST'])
+def predict_api():
+    if not request.is_json:
+        return jsonify({"error": "Unsupported Media Type. Set Content-Type: application/json"}), 415
+
+    data = request.get_json()
+
+    try:
+        features = data.get("features")
+        latitude = float(data.get("latitude"))
+        longitude = float(data.get("longitude"))
+
+        if not isinstance(features, list):
+            raise ValueError("Features should be a list of numbers.")
+
+        input_array = np.array(features).reshape(1, -1)
+        predictions = {}
+        model_probs = {}
+
+        models = {
+            "Logistic Regression": logistic_model,
+            "Decision Tree": decision_tree_model,
+            "Random Forest": random_forest_model,
+            "XGBoost": xgboost_model
+        }
+
+        for model_name, model in models.items():
+            pred = int(model.predict(input_array)[0])
+            predictions[model_name] = class_names.get(pred)
+            if hasattr(model, 'predict_proba'):
+                probs = model.predict_proba(input_array)[0]
+                model_probs[model_name] = list(map(float, probs))
+
+        lstm_input = np.array(features).reshape(1, 1, -1)
+        lstm_probs = lstm_model.predict(lstm_input, verbose=0)[0]
+        lstm_pred = int(np.argmax(lstm_probs))
+        predictions["LSTM"] = class_names.get(lstm_pred)
+        model_probs["LSTM"] = list(map(float, lstm_probs))
+
+        if "Severe Accident" in predictions.values():
+            subject = "🚨 Accident Alert: Severe Prediction"
+            body = f"Severe Accident Predicted!\n\nLat: {latitude}\nLon: {longitude}\nPredictions:\n" + \
+                   "\n".join(f"{k}: {v}" for k, v in predictions.items())
+            send_email(subject, body, "chetanj1005@gmail.com")
+
+        cursor.execute('''INSERT INTO predictions (
+            timestamp, features, latitude, longitude,
+            logistic_pred, decision_tree_pred, random_forest_pred,
+            xgboost_pred, lstm_pred,
+            logistic_probs, decision_tree_probs, random_forest_probs, xgboost_probs, lstm_probs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                str(features), latitude, longitude,
+                predictions.get("Logistic Regression"),
+                predictions.get("Decision Tree"),
+                predictions.get("Random Forest"),
+                predictions.get("XGBoost"),
+                predictions.get("LSTM"),
+                str(model_probs.get("Logistic Regression")),
+                str(model_probs.get("Decision Tree")),
+                str(model_probs.get("Random Forest")),
+                str(model_probs.get("XGBoost")),
+                str(model_probs.get("LSTM"))
+            ))
+        conn.commit()
+
+        return jsonify({
+            "predictions": predictions,
+            "probabilities": model_probs,
+            "class_labels": list(class_names.values())
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Prediction failed: {str(e)}"}), 400
 
 @app.route('/dashboard')
 def dashboard():
@@ -352,11 +423,10 @@ def download_csv():
     cursor.execute('SELECT * FROM predictions')
     rows = cursor.fetchall()
 
-    # Create CSV file
     csv_path = os.path.join(model_dir, 'predictions.csv')
     with open(csv_path, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow([col[0] for col in cursor.description])  # Column headers
+        writer.writerow([col[0] for col in cursor.description])
         writer.writerows(rows)
 
     return send_file(csv_path, as_attachment=True)
